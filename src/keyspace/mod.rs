@@ -794,9 +794,14 @@ impl Keyspace {
         Ok(true)
     }
 
-    fn check_write_halt(&self) {
+    fn check_write_halt(&self) -> crate::Result<()> {
         let mut next_attempt = Instant::now();
         while self.tree.l0_run_count() >= 30 {
+            // A dead worker never lowers L0, so stop waiting once it poisoned the database.
+            if self.is_poisoned.is_poisoned() {
+                return Err(crate::Error::Poisoned);
+            }
+
             if Instant::now() >= next_attempt {
                 // A worker may finish the last queued pass at the write-halt
                 // threshold without lowering L0. Keep one compaction pending.
@@ -811,20 +816,30 @@ impl Keyspace {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        Ok(())
     }
 
-    pub(crate) fn local_backpressure(&self) -> bool {
+    /// Slows or halts a write until the workers catch up with flushes and L0.
+    ///
+    /// Returns whether the write was throttled, or `Error::Poisoned` once a
+    /// failed worker poisoned the database, since nothing would then catch up.
+    pub(crate) fn local_backpressure(&self) -> crate::Result<bool> {
         let mut throttled = false;
 
         let l0_run_count = self.tree.l0_run_count();
 
         if l0_run_count >= 20 {
             perform_write_stall(l0_run_count);
-            self.check_write_halt();
+            self.check_write_halt()?;
             throttled = true;
         }
 
         while self.tree.sealed_memtable_count() >= 4 {
+            if self.is_poisoned.is_poisoned() {
+                return Err(crate::Error::Poisoned);
+            }
+
             log::debug!(
                 "Halting writes because we have 4+ sealed memtables in {:?} queued up",
                 self.name,
@@ -833,7 +848,7 @@ impl Keyspace {
             throttled = true;
         }
 
-        throttled
+        Ok(throttled)
     }
 
     pub(crate) fn request_rotation(&self) {
@@ -855,9 +870,10 @@ impl Keyspace {
         }
     }
 
-    fn maintenance(&self, memtable_size: u64) {
+    fn maintenance(&self, memtable_size: u64) -> crate::Result<()> {
         self.check_memtable_rotate(memtable_size);
-        self.local_backpressure();
+        self.local_backpressure()?;
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -968,7 +984,7 @@ impl Keyspace {
         drop(journal_writer);
 
         self.supervisor.write_buffer_size.allocate(item_size);
-        self.maintenance(memtable_size);
+        self.maintenance(memtable_size)?;
 
         Ok(())
     }
@@ -1042,7 +1058,7 @@ impl Keyspace {
         drop(journal_writer);
 
         self.supervisor.write_buffer_size.allocate(item_size);
-        self.maintenance(memtable_size);
+        self.maintenance(memtable_size)?;
 
         Ok(())
     }
@@ -1136,7 +1152,7 @@ impl Keyspace {
         drop(journal_writer);
 
         self.supervisor.write_buffer_size.allocate(item_size);
-        self.maintenance(memtable_size);
+        self.maintenance(memtable_size)?;
 
         Ok(())
     }
