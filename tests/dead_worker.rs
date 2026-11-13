@@ -164,7 +164,10 @@ fn close_returns_after_the_worker_died() -> fjall::Result<()> {
             Err(fjall::Error::Poisoned) => break,
             result => result?,
         }
-        assert!(start.elapsed() < DEADLINE, "the failed flush never poisoned");
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the failed flush never poisoned"
+        );
         thread::sleep(Duration::from_millis(10));
     }
 
